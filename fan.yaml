@@ -1,0 +1,576 @@
+esphome:
+  name: "pwm-fan"
+  on_boot:
+    priority: 600
+    # ...
+    then:
+      - rtttl.play: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+# Enable Home Assistant API
+api:
+
+ota:
+  - platform: esphome
+substitutions:
+  bafakey: "1" #巴法云用户密钥，使用巴法云必须配置正确
+  #以下三个为自然风相关，按需修改
+  gentle_initial_valuel: "5"  #温柔风初始值
+  max_initial_valuel: "20"  #最大值默认值
+  min_initial_valuel: "5"  #最小值默认值   
+wifi:
+  networks:
+  - ssid: "Xiaomi-4343"
+    password: "3uf8583n"
+    manual_ip:
+      static_ip: 192.168.2.10
+      gateway: 192.168.2.1
+      subnet: 255.255.255.0
+  - ssid: "ChinaNet-3CEEVV"
+    password: "123456sb"
+    manual_ip:
+      static_ip: 192.168.2.10
+      gateway: 192.168.2.1
+      subnet: 255.255.255.0
+
+captive_portal:
+
+web_server:
+  port: 80
+number:
+  - platform: template
+    icon: "mdi:fan-plus"
+    id: speed_input
+    name: "档位"
+    lambda: |-
+      return id(fan_speed).speed;
+    step: 1
+    min_value: 0
+    max_value: 20
+    unit_of_measurement: "档"
+    update_interval: 1s
+    set_action:
+      then:
+        - fan.turn_on:
+            id: fan_speed
+            speed: !lambda "return x ;" 
+  - platform: template #number3用于设置自然风的最大值
+    id: number3
+    name: "1 自然风最大值"
+    optimistic: true
+    min_value: 5
+    max_value: 20
+    internal: true
+    initial_value: ${max_initial_valuel}
+    step: 1
+    mode: BOX
+  - platform: template #number4用于设置自然风的最小值
+    id: number4
+    name: "0 自然风最小值"
+    optimistic: true
+    min_value: 5
+    max_value: 20
+    initial_value: ${min_initial_valuel}
+    step: 1
+    mode: BOX
+    internal: true
+  - platform: template #number5用于设置自然风的最小值
+    id: number5
+    name: "2 自然风初始值"
+    optimistic: true
+    min_value: 5
+    max_value: 20
+    initial_value: ${gentle_initial_valuel}
+    step: 1
+    mode: BOX
+    internal: true
+  - platform: template  #number1用于设置及显示定时时间
+    name: "自然风定时器"
+    id: number1
+    #optimistic: true
+    min_value: 0
+    max_value: 360
+    step: 5
+    mode: slider
+    unit_of_measurement: "分钟"
+    icon: mdi:av-timer
+    lambda: |-
+      return id(countdown_d_duration_value);
+    set_action:
+      - script.stop: countdown_timer_e_script
+      - lambda: |-
+          id(countdown_d_duration_value) = x;
+      - script.execute: countdown_timer_e_script
+  - platform: template #number2用于最后一次操作的时间，秒
+    id: number2
+    optimistic: true
+    min_value: 0
+    max_value: 100
+    step: 1
+    mode: BOX
+output:
+  - platform: ledc
+    pin:
+      number: GPIO20
+    id: rtttl_out
+    max_power: "1.0"
+    frequency: 22 kHz
+    channel: 4
+    inverted: False
+  - platform: ledc
+    pin: GPIO5
+    frequency: 20000 Hz
+    max_power: "0.7"
+    id: output_1
+    inverted: true
+    channel: 0
+  - platform: gpio
+    pin:
+      number: GPIO4
+      #inverted: true
+      mode:
+        output: true
+        open_drain: true
+    id: 'generic_out'
+  - platform: ledc
+    pin: GPIO10
+    id: my_slow_pwm
+    channel: 2
+    frequency: 1000 Hz ##internal: true AC引脚
+# light:
+#   - platform: monochromatic
+#     name: "Kitchen Lights"
+#     output: my_slow_pwm
+#     #internal: true
+rtttl:
+  output: rtttl_out
+fan:
+  - platform: speed
+    output: output_1
+    name: "风扇"
+    id: fan_speed
+    direction_output: generic_out
+    speed_count: 20
+    restore_mode: ALWAYS_ON
+    on_turn_on:
+      - rtttl.play: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+switch:
+  - platform: template #用于标记定时状态
+    id: time_state
+    optimistic: true 
+  - platform: gpio 
+    name: "S启动"
+    internal: true
+    pin:
+      number: GPIO6
+      inverted: true
+      mode:
+        output: true
+        open_drain: true
+    restore_mode: ALWAYS_ON
+sensor:
+  - platform: pulse_counter
+    pin:
+      number: GPIO7
+      mode:
+        input: true
+        pullup: true
+    name: "Pulse Counter"
+    internal: True
+    internal_filter: 13us
+    unit_of_measurement: "转"
+    accuracy_decimals: 0
+    #use_pcnt: true
+    update_interval: 10s
+    id: pulse_counter_id  # 给脉冲计数器一个 ID
+
+  - platform: template
+    name: "Adjusted Pulse Counter"
+    id: adjusted_pulse_counter
+    unit_of_measurement: "转"
+    icon: mdi:pulse
+    accuracy_decimals: 0
+    lambda: |-
+      return id(pulse_counter_id).state / 3.0;
+    update_interval: 5s
+  - platform: wifi_signal
+    name: "WiFi Signal Sensor"
+    update_interval: 60s
+  - platform: template
+    icon: "mdi:fan"
+    id: duty
+    name: "风扇速度"
+    lambda: |-
+      return id(fan_speed).speed;
+    update_interval: 1s
+    accuracy_decimals: 0
+    unit_of_measurement: "档"
+binary_sensor:
+  - platform: gpio 
+    name: "米家输出引脚"
+    internal: true
+    pin:
+      number: GPIO1
+      inverted: true
+    on_press:
+      then:
+        - lambda: |-
+            static int fan_state = 0;  // 用于记录风扇状态的静态变量
+            fan_state = (fan_state + 1) % 4;  // 更新状态，循环为0, 1, 2, 3
+            // 获取风扇实体
+            auto call = id(fan_speed).make_call();
+            switch(fan_state) {
+              case 0:
+                call.set_state(false);  // 关闭风扇
+                break;
+              case 1:
+                call.set_state(true);   // 打开风扇
+                call.set_speed(10);      // 设置为低速
+                break;
+              case 2:
+                call.set_speed(15);      // 设置为中速
+                break;
+              case 3:
+                call.set_speed(20);      // 设置为高速
+                break;
+            }
+            call.perform();  // 执行设置
+    # on_press:
+    #   then:
+    #     - lambda: |-
+    #         static int fan_state = 0;  // 用于记录风扇状态的静态变量
+    #         fan_state = (fan_state + 1) % 4;  // 更新状态，循环为0, 1, 2, 3
+    #         // 根据当前状态切换风扇速度或关闭风扇
+    #         switch(fan_state) {
+    #           case 0:
+    #             auto call_off = id(my_fan).turn_off();
+    #             call_off.perform();
+    #             break;
+    #           case 1:
+    #             auto call_on_low = id(my_fan).turn_on();
+    #             call_on_low.set_speed(1);  // 假设1代表30%的低速
+    #             call_on_low.perform();
+    #             break;
+    #           case 2:
+    #             auto call_on_mid = id(my_fan).turn_on();
+    #             call_on_mid.set_speed(2);  // 假设2代表60%的中速
+    #             call_on_mid.perform();
+    #             break;
+    #           case 3:
+    #             auto call_on_high = id(my_fan).turn_on();
+    #             call_on_high.set_speed(3);  // 假设3代表99%的高速
+    #             call_on_high.perform();
+    #             break;
+    #         }
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "2档"
+    internal: true
+    id: TEST1
+    filters:
+      - delayed_on_off: 2s
+    on_press:
+      - fan.turn_on:
+          id: fan_speed
+          speed: 15
+      - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+    on_release:
+      then:
+        - lambda: 'if (!id(TEST2).state && !id(TEST3).state) id(all_off) = true; else id(all_off) = false;'
+        - if:
+            condition:
+              lambda: 'return id(all_off);'
+            then:
+              - fan.turn_off: fan_speed
+              - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+  - platform: gpio
+    internal: true
+    id: TEST2
+    pin:
+      number: GPIO2
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "3档"
+    filters:
+      - delayed_on_off: 2s
+    on_press:
+      - fan.turn_on:
+          id: fan_speed
+          speed: 20
+      - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+    on_release:
+      then:
+        - lambda: 'if (!id(TEST1).state && !id(TEST3).state) id(all_off) = true; else id(all_off) = false;'
+        - if:
+            condition:
+              lambda: 'return id(all_off);'
+            then:
+              - fan.turn_off: fan_speed
+              - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+  - platform: gpio
+    id: TEST3
+    pin:
+      number: GPIO3
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "1档"
+    internal: true
+    filters:
+      - delayed_on_off: 2s
+    on_press:
+      - fan.turn_on:
+          id: fan_speed
+          speed: 8
+      - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+    on_release:
+      then:
+        - lambda: 'if (!id(TEST2).state && !id(TEST1).state) id(all_off) = true; else id(all_off) = false;'
+        - if:
+            condition:
+              lambda: 'return id(all_off);'
+            then:
+              - fan.turn_off: fan_speed
+              - rtttl.play: "key_beep:d=32,o=7,b=120:g"
+  - platform: gpio
+    pin:
+      number: GPIO21
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "定时器"
+    internal: True
+
+interval:  #定义间隔时间组件
+  - interval: 1s  # 每秒一次
+    then:
+      - number.increment:
+          id: number2
+          cycle: false
+      - if:
+          condition:  # 按键操作超过12秒才进行动作, 且未开启自然风
+            and:
+              - lambda: |-
+                  return id(mode).state == "关";
+              - number.in_range:
+                  id: number2
+                  above: 12
+          then: 
+            if:
+              condition:
+                - fan.is_on: fan_speed
+              then:
+  - interval: 1min #每分钟执行一次，用于定时
+    then:
+      - if:
+          condition: #判断是否开启了定时
+            - switch.is_on: time_state
+          then:      #对定时值进行递减
+            - number.decrement:
+                id: number1
+                cycle: false      
+      - delay: 1s   #等待1秒              
+      - if:
+          condition:  #判断定时值，小于等于0
+            number.in_range:
+              id: number1
+              below: 0
+          then: 
+            if:
+              condition:  #档定时开关打开，且值小于等于0，就关风扇
+                - switch.is_on: time_state
+              then:  
+                - fan.turn_off: fan_speed
+          else: #大于时，开启定时开关
+            - switch.turn_on: time_state 
+                             
+  - interval: 5s  #自然风,每5秒一次。根据不同模式设置风速
+    then:
+      if:
+        condition:
+          and:
+            - fan.is_on: fan_speed
+        then:
+          - if:
+              condition:
+                - lambda: |-
+                    return id(mode).state == "温柔";
+              then:
+                - lambda: |-
+                    int base_speed = id(number5).state;  // 使用number5的值作为基本风速
+                    int gust_speed = base_speed + rand() % (static_cast<int>(id(number3).state) - base_speed + 1);  //生成一个随机值
+                    int gradient_speed = base_speed + rand() % (static_cast<int>(id(number4).state) - base_speed + 1); //生成一个随机值
+                    int new_speed = (base_speed + gust_speed + gradient_speed) / 3;   //取平均
+                    //使差值不大于30
+                    if (abs(new_speed - id(current_speed)) > 20) {   
+                      new_speed = id(current_speed) + (new_speed > id(current_speed) ? 20 : -10);
+                    }
+                    id(current_speed) = new_speed;  
+                    //设置风速
+                    auto call = id(fan_speed).turn_on();
+                    call.set_speed(new_speed);
+                    call.perform();   
+          - if:
+              condition:
+                - lambda: |- 
+                    return id(mode).state == "中等";
+              then:
+                - lambda: |-
+                    int min_speed = 8;
+                    int max_speed = 16;
+                    int new_speed = min_speed + rand() % (max_speed - min_speed + 1);
+                    if (abs(new_speed - id(current_speed)) > 16) {
+                      new_speed = id(current_speed) + (new_speed > id(current_speed) ? 16 : -16);
+                    }
+                    id(current_speed) = new_speed;
+                    auto call = id(fan_speed).turn_on();
+                    call.set_speed(new_speed);
+                    call.perform();   
+          - if:
+              condition:
+                - lambda: |-
+                    return id(mode).state == "强风";
+              then:
+                - fan.turn_on:
+                    id: fan_speed
+                    speed: !lambda 'return 10 + rand() % 21;'
+select: #定义选择器
+  - platform: template #自然风模式的选择
+    name: "自然风模式"
+    id: mode
+    optimistic: true
+    initial_option: 关
+    restore_value: true 
+    options:
+      - 温柔
+      - 中等
+      - 强风
+      - 关
+globals: ##定义全局变量
+  - id: duty_previous  ##存储占空比值
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: current_speed ##存储风速值，用于自然风
+    type: int
+    restore_value: no
+    initial_value: '10'
+  - id: timer_value
+    type: int
+    initial_value: '0'
+  - id: all_off
+    type: bool
+  - id: oscillation_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: countdown_d_duration_value
+    type: int
+  - id: countdown_d_remaining_time
+    type: int
+  - id: sequence_script_running
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: fan_speed_state
+    type: int
+    initial_value: '0'
+text_sensor:
+  - platform: template
+    id: script_status_display
+    name: "睡眠状态"
+    icon: "mdi:weather-night"
+    update_interval: 1s
+    lambda: |-
+      if (id(sequence_script_running)) {
+        return { "启用" };
+      } else {
+        return { "未开启" };
+      }
+  - platform: template
+    name: "倒计时"
+    id: countdown_display_result
+    icon: "mdi:timer-outline"
+    lambda: |-
+      if (id(countdown_display_result)) {
+        return { "未开启" }; // Replace this with your desired message when the script is running.
+      } else {
+        return { "停止" };
+      }
+script:
+  - id: countdown_timer_e_script
+    then:
+      - lambda: |-
+          id(countdown_d_remaining_time) = id(countdown_d_duration_value) * 60;
+      - fan.turn_on: fan_speed
+      - while:
+          condition:
+            lambda: 'return id(countdown_d_remaining_time) > 0;'
+          then:
+            - text_sensor.template.publish:
+                id: countdown_display_result
+                state: !lambda 'return "提示: " + to_string(id(countdown_d_remaining_time) / 60) + " 分钟 " + to_string(id(countdown_d_remaining_time) % 60) + " 秒后关闭风扇";'
+            - delay: 1s
+            - lambda: |-
+                id(countdown_d_remaining_time) -= 1;
+      - fan.turn_off: fan_speed
+  - id: sequence_script
+    then:
+      - globals.set:
+          id: sequence_script_running
+          value: 'true'
+      - select.set:
+          id: mode
+          option: "强风"
+      - delay: 1800s
+      - select.set:
+          id: mode
+          option: "中等"
+      - delay: 1800s
+      - select.set:
+          id: mode
+          option: "温柔"
+      - delay: 1800s
+      - fan.turn_off:
+          id: fan_speed
+      - globals.set:
+          id: sequence_script_running
+          value: 'false'
+button:
+  - platform: template
+    name: "终止定时"
+    id: start_button
+    on_press:
+      then:
+        - script.stop: sequence_script ##停止睡眠模式
+        - script.stop: countdown_timer_e_script ###停止自由时间
+        - fan.turn_off: fan_speed ###关闭风扇
+        - globals.set:
+            id: sequence_script_running
+            value: 'false'
+        - rtttl.play: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+        # - select.set_index:
+        #     id: mode
+        #     index: 4
+  - platform: template
+    name: "睡眠风"
+    id: start_button3
+    icon: mdi:weather-night
+    on_press:
+      then:
+        - fan.turn_on: fan_speed
+        - script.execute: sequence_script
