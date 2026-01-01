@@ -1,30 +1,25 @@
 esphome:
   name: pzmacdb
-  on_boot:
-    - priority: -10
-      then:
-        - wait_until:
-            lambda: return id(sntp_time).now().is_valid();
-        - globals.set:
-            id: g_boot_complete
-            value: 'true'
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
+# 启用 Web 服务
 web_server:
   port: 80
 
+# 日志
 logger:
   level: INFO
   baud_rate: 0 
 
 api:
+
 ota:
   - platform: esphome
-
+text_sensor:
 wifi:
   networks:
   - ssid: "ChinaNet-3CEEVV"
@@ -39,23 +34,30 @@ wifi:
       static_ip: 192.168.2.33
       gateway: 192.168.2.1
       subnet: 255.255.255.0
-  use_address: 192.168.2.33
+  ap:
 
 captive_portal:
 
-# ================= 全局变量 (严格保留原始 575 行逻辑的所有变量) =================
+# ================= 核心：全局变量数据库 (原封不动) =================
 globals:
+  # 状态标记
   - id: g_boot_complete
     type: bool
     initial_value: 'false'
+  
+  # 上次计算时的电表总读数
   - id: g_last_energy_reading
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+  # --- 余额 ---
   - id: g_balance
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+  # --- 今日数据 ---
   - id: g_today_usage
     type: float
     restore_value: yes
@@ -80,6 +82,8 @@ globals:
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+  # --- 本月数据 ---
   - id: g_month_usage
     type: float
     restore_value: yes
@@ -104,6 +108,8 @@ globals:
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+  # --- 历史数据 (昨日/上月) ---
   - id: g_yesterday_usage
     type: float
     restore_value: yes
@@ -120,23 +126,24 @@ globals:
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+  # --- 年度与重置 ---
   - id: g_year_base_offset
     type: float
     restore_value: yes
     initial_value: '0.0'
-  # 【修复清零必需】新增月份记录变量
-  - id: g_last_reset_month
-    type: int
-    restore_value: yes
 
-# ================= 硬件定义 =================
+# ================= 硬件配置 (原封不动) =================
+
 uart:
+  # 雷达 UART
   - id: uart_radar
     tx_pin: GPIO3
     rx_pin: GPIO2
     baud_rate: 115200
     parity: NONE
     stop_bits: 1
+  # 电表 UART
   - id: uart_pzem
     tx_pin: GPIO21
     rx_pin: GPIO20
@@ -146,6 +153,7 @@ modbus:
   - id: modbus_pzem
     uart_id: uart_pzem
 
+# 雷达组件
 external_components:
   - source:
       type: git
@@ -157,100 +165,170 @@ hlk_ld2402:
   max_distance: 5.0
   timeout: 5
 
-# 【修改】改为从 Home Assistant 获取时间，解决 SNTP 不稳定的问题
+# 时间同步 (保持你的逻辑)
 time:
   - platform: homeassistant
     id: sntp_time
     timezone: Asia/Shanghai
+    
     on_time:
-      # 每日零点重置 (保留原逻辑)
+      # === 每日重置 (00:00:00) ===
       - seconds: 0
         minutes: 0
         hours: 0
         then:
           - lambda: |-
+              // 转移今日数据到昨日
               id(g_yesterday_usage) = id(g_today_usage);
               id(g_yesterday_cost) = id(g_today_cost);
-              id(g_today_usage) = 0.0; id(g_today_cost) = 0.0;
-              id(g_today_peak_usage) = 0.0; id(g_today_peak_cost) = 0.0;
-              id(g_today_valley_usage) = 0.0; id(g_today_valley_cost) = 0.0;
+              
+              // 清零今日
+              id(g_today_usage) = 0.0;
+              id(g_today_cost) = 0.0;
+              id(g_today_peak_usage) = 0.0;
+              id(g_today_peak_cost) = 0.0;
+              id(g_today_valley_usage) = 0.0;
+              id(g_today_valley_cost) = 0.0;
 
-# 【新增脚本】处理每月清零 (解决 C++ protected 权限问题)
-script:
-  - id: monthly_reset_script
-    then:
-      - lambda: |-
-          ESP_LOGW("reset", "检测到月份变更，执行补跳重置逻辑...");
-          id(g_last_month_usage) = id(g_month_usage);
-          id(g_last_month_cost) = id(g_month_cost);
-          id(g_year_base_offset) += id(g_month_usage);
-          id(g_month_usage) = 0.0; id(g_month_cost) = 0.0;
-          id(g_month_peak_usage) = 0.0; id(g_month_peak_cost) = 0.0;
-          id(g_month_valley_usage) = 0.0; id(g_month_valley_cost) = 0.0;
-          id(g_last_energy_reading) = 0.0;
-          id(g_last_reset_month) = id(sntp_time).now().month;
-      - pzemac.reset_energy: pzem_sensor
+      # === 每月重置 (1号 00:00:00) ===
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        days_of_month: 1
+        then:
+          - lambda: |-
+              // 转移本月数据到上月
+              id(g_last_month_usage) = id(g_month_usage);
+              id(g_last_month_cost) = id(g_month_cost);
+              
+              // 记录年度偏移量 (因为PZEM清零了)
+              id(g_year_base_offset) += id(g_month_usage);
+              
+              // 清零本月
+              id(g_month_usage) = 0.0;
+              id(g_month_cost) = 0.0;
+              id(g_month_peak_usage) = 0.0;
+              id(g_month_peak_cost) = 0.0;
+              id(g_month_valley_usage) = 0.0;
+              id(g_month_valley_cost) = 0.0;
 
-# ================= 核心计算逻辑 (完全保留原始代码，仅增加月份审计) =================
+              // 重置计算锚点
+              id(g_last_energy_reading) = 0.0;
+
+          # 硬件清零电表
+          - pzemac.reset_energy: pzem_sensor
+          - delay: 2s
+          # 强制刷新一次确保读数变回0
+          - component.update: pzem_sensor
+
+# ================= 核心计算逻辑 (心跳 - 原封不动) =================
 interval:
   - interval: 3s
     then:
       - lambda: |-
+          // 1. 安全检查
           if (!id(sntp_time).now().is_valid()) return;
+          if (isnan(id(pzem_total_energy).state)) return;
+          
           float current_total = id(pzem_total_energy).state;
-          if (isnan(current_total) || !id(g_boot_complete)) return;
-
-          // --- 【清零修复：月份审计】 ---
-          auto now = id(sntp_time).now();
-          if (now.month != id(g_last_reset_month)) {
-              id(monthly_reset_script).execute();
+          
+          // 2. 初始化逻辑
+          if (!id(g_boot_complete)) {
+            id(g_last_energy_reading) = current_total;
+            id(g_boot_complete) = true;
+            return; 
           }
 
-          // --- 以下全是你的原封不动逻辑 ---
+          // 3. 计算增量 (Delta)
           float delta = current_total - id(g_last_energy_reading);
-          if (delta < 0) delta = current_total;
-          if (delta < 0.0001) return;
+          
+          // 异常处理：电表重置
+          if (delta < 0) {
+             delta = current_total;
+          }
+          
+          // 忽略微小误差
+          if (delta < 0.0001) {
+            id(g_last_energy_reading) = current_total;
+            return;
+          }
 
-          int hour = now.hour;
-          int month = now.month;
+          // 4. 判断峰谷 (7:00 - 23:00 为峰)
+          int hour = id(sntp_time).now().hour;
+          int month = id(sntp_time).now().month;
           bool is_peak = (hour >= 7 && hour < 23);
+
+          // 5. 判断阶梯电价
           float m_usage = id(g_month_usage); 
           float price = 0.0;
+
           float base_p = 0.5224;
           float valley_p = (month >= 6 && month <= 10) ? 0.175 : 0.235;
+          
           if (m_usage > 180 && m_usage <= 280) {
-             base_p = 0.6224; valley_p = (month >= 6 && month <= 10) ? 0.275 : 0.335;
+             base_p = 0.6224;
+             valley_p = (month >= 6 && month <= 10) ? 0.275 : 0.335;
           } else if (m_usage > 280) {
-             base_p = 0.8224; valley_p = (month >= 6 && month <= 10) ? 0.475 : 0.535;
+             base_p = 0.8224;
+             valley_p = (month >= 6 && month <= 10) ? 0.475 : 0.535;
           }
-          price = is_peak ? base_p : valley_p;
+          
+          if (is_peak) {
+             price = base_p; 
+          } else {
+             price = valley_p;
+          }
+
+          // 6. 核心累加
           float cost = delta * price;
 
-          id(g_today_usage) += delta; id(g_today_cost) += cost;
-          id(g_month_usage) += delta; id(g_month_cost) += cost;
+          id(g_today_usage) += delta;
+          id(g_today_cost) += cost;
+          
+          id(g_month_usage) += delta;
+          id(g_month_cost) += cost;
+          
           id(g_balance) -= cost;
           if (id(g_balance) < 0) id(g_balance) = 0;
 
           if (is_peak) {
-            id(g_today_peak_usage) += delta; id(g_today_peak_cost) += cost;
-            id(g_month_peak_usage) += delta; id(g_month_peak_cost) += cost;
+            id(g_today_peak_usage) += delta;
+            id(g_today_peak_cost) += cost;
+            id(g_month_peak_usage) += delta;
+            id(g_month_peak_cost) += cost;
           } else {
-            id(g_today_valley_usage) += delta; id(g_today_valley_cost) += cost;
-            id(g_month_valley_usage) += delta; id(g_month_valley_cost) += cost;
+            id(g_today_valley_usage) += delta;
+            id(g_today_valley_cost) += cost;
+            id(g_month_valley_usage) += delta;
+            id(g_month_valley_cost) += cost;
           }
+
+          // 7. 保存断点
           id(g_last_energy_reading) = current_total;
 
-# ================= 传感器 (Emoji + 规避 ASCII 冲突) =================
+# ================= 传感器定义 (仅加 Emoji 和 英文后缀) =================
+
 sensor:
+  # --- 纯硬件读数 ---
   - platform: pzemac
     id: pzem_sensor
     modbus_id: modbus_pzem
     update_interval: 3s
-    current: { name: "🔌 电流 (Current)" }
-    voltage: { name: "⚡ 电压 (Voltage)" }
-    power: { name: "🔥 功率 (Power)" }
-    frequency: { name: "〰️ 频率 (Frequency)" }
-    power_factor: { name: "💎 功率因数 (Power Factor)" }
+    current:
+      name: "🔌 电流 (Current)"
+      accuracy_decimals: 3
+    voltage:
+      name: "⚡ 电压 (Voltage)"
+      accuracy_decimals: 1
+    power:
+      name: "🔥 功率 (Power)"
+      accuracy_decimals: 1
+    frequency:
+      name: "〰️ 频率 (Frequency)"
+      accuracy_decimals: 1
+    power_factor:
+      name: "💎 功率因数 (Power Factor)"
+      accuracy_decimals: 2
     energy:
       name: "📑 累计总电量 (Total Energy)"
       id: pzem_total_energy
@@ -259,103 +337,185 @@ sensor:
         - multiply: 0.001
       accuracy_decimals: 3
 
+  - platform: adc
+    pin: 1
+    name: "☀️ 光照度 (Illuminance)"
+    update_interval: 10s
+    unit_of_measurement: lx
+    filters:
+      - lambda: return (x / 10000.0) * 2000000.0;
+
   - platform: hlk_ld2402
     id: radar_dist
     name: "📏 雷达距离 (Radar Dist)"
     hlk_ld2402_id: radar_device
+    device_class: distance
     unit_of_measurement: "cm"
 
-  - platform: adc
-    pin: 1
-    name: "☀️ 光照度 (Illuminance)"
-    filters:
-      - lambda: return (x / 10000.0) * 2000000.0;
-
+  # --- 显示型传感器 ---
+  
   - platform: template
     name: "💰 电费余额 (Balance)"
     unit_of_measurement: CNY
+    accuracy_decimals: 2
     lambda: return id(g_balance);
+    update_interval: 3s
 
   - platform: template
     name: "💹 当前电价 (Price)"
     unit_of_measurement: '元/度'
     accuracy_decimals: 4
+    update_interval: 10s
     lambda: |-
-      auto now = id(sntp_time).now();
-      int month = now.month;
+      int month = id(sntp_time).now().month;
       float m_usage = id(g_month_usage);
-      int hour = now.hour;
+      int hour = id(sntp_time).now().hour;
       bool is_valley = (hour >= 23 || hour < 7);
+      
       float base = 0.5224;
       float valley = (month >= 6 && month <= 10) ? 0.175 : 0.235;
+
       if (m_usage > 180 && m_usage <= 280) {
-         base = 0.6224; valley = (month >= 6 && month <= 10) ? 0.275 : 0.335;
+         base = 0.6224;
+         valley = (month >= 6 && month <= 10) ? 0.275 : 0.335;
       } else if (m_usage > 280) {
-         base = 0.8224; valley = (month >= 6 && month <= 10) ? 0.475 : 0.535;
+         base = 0.8224;
+         valley = (month >= 6 && month <= 10) ? 0.475 : 0.535;
       }
       return is_valley ? valley : base;
 
   - platform: template
-    name: "📊 本月电费 (Month Bill)"
-    unit_of_measurement: CNY
-    lambda: return id(g_month_cost);
-  - platform: template
     name: "📊 本月总用量 (Month Usage)"
     unit_of_measurement: kWh
+    accuracy_decimals: 3
     lambda: return id(g_month_usage);
+    update_interval: 5s
+    
+  - platform: template
+    name: "📅 本月电费 (Month Bill)"
+    unit_of_measurement: CNY
+    accuracy_decimals: 2
+    lambda: return id(g_month_cost);
+    update_interval: 5s
+
+  - platform: template
+    name: "📈 本月峰段用量 (Month Peak Usage)"
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    lambda: return id(g_month_peak_usage);
+    update_interval: 5s
+
+  - platform: template
+    name: "📅 本月峰段电费 (Month Peak Bill)"
+    unit_of_measurement: CNY
+    accuracy_decimals: 2
+    lambda: return id(g_month_peak_cost);
+    update_interval: 5s
+
+  - platform: template
+    name: "📉 本月谷段用量 (Month Valley Usage)"
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    lambda: return id(g_month_valley_usage);
+    update_interval: 5s
+
+  - platform: template
+    name: "📅 本月谷段电费 (Month Valley Bill)"
+    unit_of_measurement: CNY
+    accuracy_decimals: 2
+    lambda: return id(g_month_valley_cost);
+    update_interval: 5s
+
+  - platform: template
+    name: "📈 今日用量 (Today Usage)"
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    lambda: return id(g_today_usage);
+    update_interval: 3s
+
   - platform: template
     name: "📅 今日电费 (Today Bill)"
     unit_of_measurement: CNY
+    accuracy_decimals: 2
     lambda: return id(g_today_cost);
+    update_interval: 3s
+  
+  - platform: template
+    name: "📈 今日峰段用量 (Today Peak Usage)"
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    lambda: return id(g_today_peak_usage);
+    update_interval: 5s
+
+  - platform: template
+    name: "📅 今日峰段电费 (Today Peak Bill)"
+    unit_of_measurement: CNY
+    accuracy_decimals: 2
+    lambda: return id(g_today_peak_cost);
+    update_interval: 5s
+
+  - platform: template
+    name: "📉 今日谷段用量 (Today Valley Usage)"
+    unit_of_measurement: kWh
+    accuracy_decimals: 3
+    lambda: return id(g_today_valley_usage);
+    update_interval: 5s
+
+  - platform: template
+    name: "📅 今日谷段电费 (Today Valley Bill)"
+    unit_of_measurement: CNY
+    accuracy_decimals: 2
+    lambda: return id(g_today_valley_cost);
+    update_interval: 5s
+
   - platform: template
     name: "🗓️ 年度实际用量 (Annual Usage)"
     unit_of_measurement: kWh
-    lambda: return id(g_year_base_offset) + id(g_month_usage);
+    accuracy_decimals: 3
+    lambda: return id(g_year_base_offset) + id(pzem_total_energy).state;
+    update_interval: 10s
+
   - platform: template
     name: "⏪ 昨日电费 (Yesterday Bill)"
     unit_of_measurement: CNY
+    accuracy_decimals: 2
     lambda: return id(g_yesterday_cost);
+    update_interval: 60s
+  
   - platform: template
     name: "🔙 上月电费 (Last Month Bill)"
     unit_of_measurement: CNY
+    accuracy_decimals: 2
     lambda: return id(g_last_month_cost);
+    update_interval: 60s
+
   - platform: wifi_signal
     name: "📶 WiFi信号 (WiFi Signal)"
+    update_interval: 60s
 
 binary_sensor:
   - platform: hlk_ld2402
-    name: "🏠 存在感应 (Presence)"
     id: radar_presence
+    name: "🏠 存在感应 (Presence)"
     device_class: presence
     hlk_ld2402_id: radar_device
+
   - platform: hlk_ld2402
-    name: "🏃 运动感应 (Movement)"
     id: radar_move
+    name: "🏃 运动感应 (Movement)"
     device_class: motion
     hlk_ld2402_id: radar_device
-
-text_sensor:
-  # === 【查看系统时间】 ===
-  - platform: template
-    name: "📅 系统实时时间 (System Time)"
-    icon: mdi:clock-check
-    lambda: |-
-      auto now = id(sntp_time).now();
-      if (now.is_valid()) {
-        return now.strftime("%Y-%m-%d %H:%M:%S");
-      } else {
-        return std::string("获取中...");
-      }
-    update_interval: 10s
 
 switch:
   - platform: gpio
     pin: 5
-    name: "🔌 物理总开关 (Switch)"
+    name: "🔌 开关 (Switch)"
 
+# ================= 助手与设置 (Number/Button) =================
 number:
   - platform: template
-    name: "💳 设置余额助手 (Set Balance)"
+    name: "💳 设置余额 (Set Balance)"
+    id: set_bal
     min_value: 0
     max_value: 10000
     step: 1
@@ -363,9 +523,12 @@ number:
     unit_of_measurement: CNY
     set_action:
       then:
-        - lambda: id(g_balance) = x;
+        - lambda: |-
+            id(g_balance) = x;
+
   - platform: template
-    name: "📊 设置本月用量助手 (Set Month Usage)"
+    name: "📊 设置本月用量 (Set Month Usage)"
+    id: set_mon_use
     min_value: 0
     max_value: 10000
     step: 1
@@ -373,20 +536,35 @@ number:
     unit_of_measurement: kWh
     set_action:
       then:
-        - lambda: id(g_month_usage) = x;
+        - lambda: |-
+            id(g_month_usage) = x;
 
 button:
   - platform: template
-    name: "🧹 强制触发月份清零 (Manual Month Reset)"
-    icon: mdi:sync
+    name: "🚀 强制初始化数据 (Force Reset All)"
+    icon: mdi:nuke
     on_press:
-      - script.execute: monthly_reset_script
+      - lambda: |-
+          id(g_today_usage) = 0.0;
+          id(g_today_cost) = 0.0;
+          id(g_month_usage) = 0.0;
+          id(g_month_cost) = 0.0;
+          id(g_today_peak_usage) = 0.0;
+          id(g_today_valley_usage) = 0.0;
+          id(g_month_peak_usage) = 0.0;
+          id(g_month_valley_usage) = 0.0;
+          id(g_last_energy_reading) = id(pzem_total_energy).state;
+          ESP_LOGI("custom", "新年电力数据已手动初始化！");
   - platform: template
     name: "🗑️ 清零今日数据 (Clear Today)"
     on_press:
       - lambda: |-
-          id(g_today_usage) = 0.0; id(g_today_cost) = 0.0;
-          id(g_today_peak_usage) = 0.0; id(g_today_peak_cost) = 0.0;
-          id(g_today_valley_usage) = 0.0; id(g_today_valley_cost) = 0.0;
+          id(g_today_usage) = 0.0;
+          id(g_today_cost) = 0.0;
+          id(g_today_peak_usage) = 0.0;
+          id(g_today_peak_cost) = 0.0;
+          id(g_today_valley_usage) = 0.0;
+          id(g_today_valley_cost) = 0.0;
+
   - platform: restart
     name: "🔄 重启设备 (Reboot)"
