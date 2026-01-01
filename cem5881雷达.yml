@@ -1,0 +1,385 @@
+esphome:
+  name: "cem5881-radar"
+  friendly_name: "CEM5881 Radar"
+  on_boot:
+    - switch.turn_off: internal_power_sw
+    - delay: 1s
+    - switch.turn_on: internal_power_sw
+    
+    # 初始化
+    - globals.set:
+        id: current_mode
+        value: '1'
+    - select.set:
+        id: main_mode_select
+        option: "TTL串口模式 (Serial)"
+    
+    # 启动看门狗
+    - lambda: id(last_motion_time) = millis();
+    
+    # 自动获取版本
+    - delay: 4s
+    - if:
+        condition:
+          lambda: 'return id(current_mode) == 1;'
+        then:
+          - uart.write: "VER\r\n"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+web_server:
+  port: 80
+ota:
+  - platform: esphome
+
+wifi:
+  networks:
+  - ssid: "ChinaNet-3CEEVV"
+    password: "123456sb"
+  manual_ip:
+    static_ip: 192.168.2.15
+    gateway: 192.168.2.1
+    subnet: 255.255.255.0
+  use_address: 192.168.2.15
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/ssieb/esphome_components
+    components: [ serial ]
+
+# --- 全局变量 ---
+globals:
+  - id: current_mode
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: last_motion_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # 参数缓存
+  - id: val_ThIn
+    type: int
+    initial_value: '85'
+  - id: val_ThNormal
+    type: int
+    initial_value: '80'
+  - id: val_EffIn
+    type: int
+    initial_value: '10'
+  - id: val_EffNormal
+    type: int
+    initial_value: '0'
+
+uart:
+  - id: uart_bus
+    tx_pin: GPIO5
+    rx_pin: GPIO4
+    baud_rate: 115200
+    parity: NONE
+    stop_bits: 1
+    rx_buffer_size: 2048
+
+switch:
+  - platform: gpio
+    pin: GPIO7
+    id: internal_power_sw
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+# --- 主控逻辑 ---
+select:
+  - platform: template
+    name: "雷达主控 (Main Control)"
+    id: main_mode_select
+    icon: mdi:radar
+    options:
+      - "关闭 (Power Off)"
+      - "TTL串口模式 (Serial)"
+      - "IO电平模式 (IO)"
+    initial_option: "TTL串口模式 (Serial)"
+    optimistic: true
+    set_action:
+      - lambda: |-
+          if (x == "关闭 (Power Off)") {
+            id(current_mode) = 0;
+            id(internal_power_sw).turn_off();
+            id(target_direction).publish_state("🚫 雷达已关闭");
+            id(target_speed).publish_state(0);
+            id(target_signal).publish_state(0);
+            id(people_presence).publish_state(false);
+          } 
+          else if (x == "TTL串口模式 (Serial)") {
+            id(current_mode) = 1;
+            id(switch_to_serial_script).execute();
+            id(last_motion_time) = millis();
+          } 
+          else { 
+            id(current_mode) = 2;
+            id(switch_to_io_script).execute();
+          }
+
+  - platform: template
+    name: "选择要调节的参数 (Select Param)"
+    id: param_selector
+    icon: mdi:tune
+    options:
+      - "运动灵敏度 (ThIn)"
+      - "微动灵敏度 (ThNormal)"
+      - "运动检测概率 (EffIn)"
+      - "微动检测概率 (EffNormal)"
+    initial_option: "运动灵敏度 (ThIn)"
+    optimistic: true
+    set_action:
+      - lambda: |-
+          if (x == "运动灵敏度 (ThIn)") id(universal_setting).publish_state(id(val_ThIn));
+          else if (x == "微动灵敏度 (ThNormal)") id(universal_setting).publish_state(id(val_ThNormal));
+          else if (x == "运动检测概率 (EffIn)") id(universal_setting).publish_state(id(val_EffIn));
+          else if (x == "微动检测概率 (EffNormal)") id(universal_setting).publish_state(id(val_EffNormal));
+
+number:
+  - platform: template
+    name: "参数设定值 (Set Value)"
+    id: universal_setting
+    icon: mdi:pencil-box-outline
+    mode: box
+    min_value: 0
+    max_value: 250
+    step: 1
+    optimistic: true
+    set_action:
+      - lambda: |-
+          int val = (int)x;
+          std::string cmd = "";
+          std::string current_sel = id(param_selector).state;
+          
+          if (current_sel == "运动灵敏度 (ThIn)") {
+             cmd = "ThIn=" + to_string(val);
+             id(val_ThIn) = val;
+          } 
+          else if (current_sel == "微动灵敏度 (ThNormal)") {
+             cmd = "ThNormal=" + to_string(val);
+             id(val_ThNormal) = val;
+          }
+          else if (current_sel == "运动检测概率 (EffIn)") {
+             cmd = "EffIn=" + to_string(val);
+             id(val_EffIn) = val;
+          }
+          else if (current_sel == "微动检测概率 (EffNormal)") {
+             cmd = "EffNormal=" + to_string(val);
+             id(val_EffNormal) = val;
+          }
+          
+          if (!cmd.empty()) {
+            cmd += "\r\n";
+            id(uart_bus).write_str(cmd.c_str());
+          }
+
+script:
+  - id: switch_to_serial_script
+    then:
+      - if:
+          condition:
+            not:
+              switch.is_on: internal_power_sw
+          then:
+            - switch.turn_on: internal_power_sw
+            - lambda: id(target_direction).publish_state("⏳ 正在启动...");
+            - delay: 2s
+      - uart.write: "usart2led=0\r\n"
+      - delay: 100ms
+      - uart.write: "get_all\r\n"
+      - lambda: id(target_direction).publish_state("📡 读取参数...");
+      - delay: 1500ms
+      - uart.write: "VER\r\n"
+      - lambda: id(target_direction).publish_state("📡 正在工作 (Active)");
+
+  - id: switch_to_io_script
+    then:
+      - if:
+          condition:
+            not:
+              switch.is_on: internal_power_sw
+          then:
+            - switch.turn_on: internal_power_sw
+            - lambda: id(target_direction).publish_state("⏳ 正在启动...");
+            - delay: 2s
+      - uart.write: "usart2led=1\r\n"
+      - lambda: |-
+          id(target_direction).publish_state("⚡ 工作在IO模式");
+          id(target_speed).publish_state(0);
+          id(target_signal).publish_state(0);
+
+# --- 核心驱动：Interval ---
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          // 1. IO模式
+          if (id(current_mode) == 2) {
+             bool val = gpio_get_level(GPIO_NUM_4);
+             id(people_presence).publish_state(val);
+          }
+          // 2. 串口模式 (超时逻辑)
+          else if (id(current_mode) == 1) {
+             int time_diff = millis() - id(last_motion_time);
+             
+             // 2秒内有数据 = 有人
+             if (time_diff < 2000) {
+                id(people_presence).publish_state(true);
+             } 
+             // 超时 = 无人
+             else {
+                if (id(people_presence).state == true) {
+                   id(people_presence).publish_state(false);
+                   // 超时强制归零
+                   id(target_speed).publish_state(0.0);
+                   id(target_signal).publish_state(0);
+                   
+                   // 【修复点】：这里明确写“无人”，不再和“静止”混淆
+                   id(target_direction).publish_state("无人 (No Presence)");
+                }
+             }
+          }
+
+# 传感器定义
+binary_sensor:
+  - platform: template
+    id: people_presence
+    name: "有人存在 (Presence)"
+    device_class: presence
+
+text_sensor:
+  - platform: serial
+    uart_id: uart_bus
+    id: uart_readline
+    name: "UART 原始数据 (Raw)"
+    internal: true 
+    on_value:
+      then:
+        - lambda: |-
+            if (id(current_mode) != 1) return;
+            std::string raw = x;
+            
+            // --- 1. 解析速度 ---
+            float speed = 0.0;
+            int signal = 0;
+            bool is_motion = false;
+
+            if (sscanf(raw.c_str(), "v=%f km/h, str=%d", &speed, &signal) == 2) {
+                is_motion = true;
+                id(target_speed).publish_state(speed);
+                id(target_signal).publish_state(signal);
+                
+                // 【状态区分逻辑】
+                if (speed > 0.15) id(target_direction).publish_state("靠近 (Appr)");
+                else if (speed < -0.15) id(target_direction).publish_state("远离 (Recd)");
+                else if (abs(speed) <= 0.15) id(target_direction).publish_state("静止 (Stationary)"); 
+            }
+            else if (raw.find("v=") != std::string::npos) {
+                 is_motion = true;
+            }
+
+            if (is_motion) {
+                id(last_motion_time) = millis();
+                return; 
+            }
+
+            // --- 2. 解析参数 ---
+            int val = 0;
+            if (sscanf(raw.c_str(), "u32ThIn is %d", &val) == 1 || sscanf(raw.c_str(), "u16ThIn is %d", &val) == 1) {
+                id(val_ThIn) = val;
+                if (id(param_selector).state == "运动灵敏度 (ThIn)") id(universal_setting).publish_state(val);
+                return;
+            }
+            if (sscanf(raw.c_str(), "u32ThNormal is %d", &val) == 1 || sscanf(raw.c_str(), "u16ThNormal is %d", &val) == 1) {
+                id(val_ThNormal) = val;
+                if (id(param_selector).state == "微动灵敏度 (ThNormal)") id(universal_setting).publish_state(val);
+                return;
+            }
+            if (sscanf(raw.c_str(), "u32EffIn is %d", &val) == 1 || sscanf(raw.c_str(), "u16EffIn is %d", &val) == 1) {
+                id(val_EffIn) = val;
+                if (id(param_selector).state == "运动检测概率 (EffIn)") id(universal_setting).publish_state(val);
+                return;
+            }
+            if (sscanf(raw.c_str(), "u32EffNormal is %d", &val) == 1 || sscanf(raw.c_str(), "u16EffNormal is %d", &val) == 1) {
+                id(val_EffNormal) = val;
+                if (id(param_selector).state == "微动检测概率 (EffNormal)") id(universal_setting).publish_state(val);
+                return;
+            }
+
+            // --- 3. 解析版本 ---
+            bool is_version = false;
+            if (raw.find("ver:") != std::string::npos) is_version = true;
+            if (raw.find("Ver:") != std::string::npos) is_version = true;
+            if (raw.find("RKB") != std::string::npos) is_version = true;
+            if (raw.find(" is ") != std::string::npos) is_version = false;
+            if (raw.find("=") != std::string::npos) is_version = false;
+
+            if (is_version) {
+                id(radar_version).publish_state(raw);
+            }
+
+  - platform: template
+    id: target_direction
+    name: "雷达状态 (Status)"
+    icon: mdi:information-outline
+
+  - platform: template
+    id: radar_version
+    name: "雷达固件版本 (Version)"
+    icon: mdi:chip
+
+sensor:
+  - platform: template
+    id: target_speed
+    name: "目标速度 (Speed)"
+    unit_of_measurement: "km/h"
+    accuracy_decimals: 2
+    icon: mdi:speedometer
+    state_class: measurement
+    filters:
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 1
+      - round: 2
+
+  - platform: template
+    id: target_signal
+    name: "信号强度 (Signal)"
+    icon: mdi:signal-cellular-3
+    state_class: measurement
+    unit_of_measurement: ""
+
+# --- 按钮区 ---
+button:
+  - platform: template
+    id: save_btn
+    name: "保存配置到 Flash"
+    icon: mdi:content-save
+    on_press:
+      - uart.write: "save\r\n"
+
+  - platform: template
+    id: get_all_btn
+    name: "读取当前参数"
+    icon: mdi:refresh
+    on_press:
+      - uart.write: "get_all\r\n"
+      - lambda: id(target_direction).publish_state("📡 正在读取...");
+
+  - platform: template
+    id: get_ver_btn
+    name: "读取版本号"
+    icon: mdi:information
+    on_press:
+      - uart.write: "VER\r\n"
