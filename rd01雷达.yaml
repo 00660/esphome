@@ -1,0 +1,232 @@
+esphome:
+  name: "radar-elegant-final"
+  friendly_name: "LD2410 Radar"
+  on_boot:
+    - priority: -10
+      then:
+        # 1. 初始电源开启
+        - select.set:
+            id: ui_pwr_sel
+            option: "🟢 开启 (Power ON)"
+        - delay: 5s
+        # 2. 开启工程模式以获取分门能量
+        - switch.turn_on: eng_mode_sw
+        - delay: 2s
+        # 3. 执行同步脚本，让 UI 显示真实数值
+        - script.execute: sync_radar_to_ui
+
+esp8266:
+  board: d1_mini
+  framework:
+    version: recommended
+
+logger:
+  level: INFO
+  baud_rate: 115200
+  hardware_uart: UART1
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  networks:
+  - ssid: "ChinaNet-3CEEVV"
+    password: "123456sb"
+  manual_ip:
+    static_ip: 192.168.2.91
+    gateway: 192.168.2.1
+    subnet: 255.255.255.0
+  use_address: 192.168.2.91
+
+# --- 1. 硬件层 (GPIO 12 翻转) ---
+switch:
+  - platform: gpio
+    id: hw_pwr_pin
+    pin: { number: 12, inverted: true }
+    internal: true
+    restore_mode: ALWAYS_ON
+
+  - platform: ld2410
+    engineering_mode:
+      id: eng_mode_sw
+      internal: true
+
+# --- 2. 通讯层 (256000) ---
+uart:
+  id: uart_bus
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 256000
+
+ld2410:
+  uart_id: uart_bus
+
+# --- 3. 优雅选择器 (合并 Select) ---
+select:
+  - platform: template
+    name: "⚡ 雷达电源控制 (Radar Power)"
+    id: ui_pwr_sel
+    icon: mdi:power
+    options: ["🟢 开启 (Power ON)", "🔴 关闭 (Power OFF)"]
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            if (x == "🟢 开启 (Power ON)") id(hw_pwr_pin).turn_on();
+            else {
+              id(hw_pwr_pin).turn_off();
+              id(ui_dir_text).publish_state("💤 已断电 (Off)");
+            }
+
+  - platform: template
+    name: "🚪 调节距离门选择 (Gate Select)"
+    id: ui_gate_sel
+    icon: mdi:door
+    options: ["Gate 0", "Gate 1", "Gate 2", "Gate 3", "Gate 4", "Gate 5", "Gate 6", "Gate 7", "Gate 8"]
+    initial_option: "Gate 2"
+    optimistic: true
+    on_value:
+      then:
+        - script.execute: sync_radar_to_ui
+
+# --- 4. 传感器 (官方驱动 + 能量波峰) ---
+binary_sensor:
+  - platform: ld2410
+    has_target:
+      name: "👤 有人存在状态 (Presence)"
+      id: bs_presence
+      icon: mdi:account-check
+      on_state:
+        then:
+          - lambda: if(!x) id(ui_dir_text).publish_state("⚪ 区域无人");
+
+sensor:
+  - platform: ld2410
+    moving_distance:
+      name: "📍 实时运动距离 (Move Dist)"
+      id: s_move_dist
+      on_value:
+        then:
+          - lambda: |-
+              static float last_v = 0;
+              if (id(bs_presence).state) {
+                float diff = x - last_v;
+                if (diff < -0.10) id(ui_dir_text).publish_state("⬇️ 目标靠近 (Appr)");
+                else if (diff > 0.10) id(ui_dir_text).publish_state("⬆️ 目标远离 (Recd)");
+                else id(ui_dir_text).publish_state("🟢 静止微动 (Stay)");
+              }
+              last_v = x;
+    still_distance: { name: "🌊 实时静止距离 (Still Dist)" }
+    moving_energy: { name: "⚡ 运动能量 (Move Energy)" }
+    still_energy: { name: "💤 静止能量 (Still Energy)" }
+    detection_distance: { name: "📏 探测距离 (Detect Dist)" }
+    # 隐藏所有门的能量，用于计算
+    g0: { move_energy: { id: me_0, internal: true }, still_energy: { id: se_0, internal: true } }
+    g1: { move_energy: { id: me_1, internal: true }, still_energy: { id: se_1, internal: true } }
+    g2: { move_energy: { id: me_2, internal: true }, still_energy: { id: se_2, internal: true } }
+    g3: { move_energy: { id: me_3, internal: true }, still_energy: { id: se_3, internal: true } }
+    g4: { move_energy: { id: me_4, internal: true }, still_energy: { id: se_4, internal: true } }
+    g5: { move_energy: { id: me_5, internal: true }, still_energy: { id: se_5, internal: true } }
+    g6: { move_energy: { id: me_6, internal: true }, still_energy: { id: se_6, internal: true } }
+    g7: { move_energy: { id: me_7, internal: true }, still_energy: { id: se_7, internal: true } }
+    g8: { move_energy: { id: me_8, internal: true }, still_energy: { id: se_8, internal: true } }
+
+  # 【最强能量波峰距离追踪】
+  - platform: template
+    name: "🔥 最强运动门位置 (Peak Move Dist)"
+    unit_of_measurement: "m"
+    icon: mdi:fire
+    lambda: |-
+      float v[] = {id(me_0).state,id(me_1).state,id(me_2).state,id(me_3).state,id(me_4).state,id(me_5).state,id(me_6).state,id(me_7).state,id(me_8).state};
+      int m=0; for(int i=1;i<9;i++) if(v[i]>v[m]) m=i; return m*0.75f;
+    update_interval: 1s
+
+  - platform: template
+    name: "🧘 最强静止门位置 (Peak Still Dist)"
+    unit_of_measurement: "m"
+    icon: mdi:human-handsdown
+    lambda: |-
+      float v[] = {id(se_0).state,id(se_1).state,id(se_2).state,id(se_3).state,id(se_4).state,id(se_5).state,id(se_6).state,id(se_7).state,id(se_8).state};
+      int m=0; for(int i=1;i<9;i++) if(v[i]>v[m]) m=i; return m*0.75f;
+    update_interval: 1s
+
+# --- 5. 目标方位文本 ---
+text_sensor:
+  - platform: template
+    name: "🧭 目标实时方位 (Direction)"
+    id: ui_dir_text
+    icon: mdi:compass
+
+# --- 6. 参数调节 (修复 C++ 语法冲突) ---
+number:
+  - platform: template
+    name: "📉 运动灵敏度设定 (Move Thresh)"
+    id: ui_move_in
+    icon: mdi:speedometer
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            int g = (id(ui_gate_sel).state[5] - '0');
+            esphome::number::Number *n = nullptr;
+            if(g==0) n=id(r_m_0); else if(g==1) n=id(r_m_1); else if(g==2) n=id(r_m_2);
+            else if(g==3) n=id(r_m_3); else if(g==4) n=id(r_m_4); else if(g==5) n=id(r_m_5);
+            else if(g==6) n=id(r_m_6); else if(g==7) n=id(r_m_7); else n=id(r_m_8);
+            if(n) { auto call = n->make_call(); call.set_value(x); call.perform(); }
+
+  - platform: template
+    name: "🧘 静止灵敏度设定 (Still Thresh)"
+    id: ui_still_in
+    icon: mdi:human-handsdown
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            int g = (id(ui_gate_sel).state[5] - '0');
+            esphome::number::Number *n = nullptr;
+            if(g==0) n=id(r_s_0); else if(g==1) n=id(r_s_1); else if(g==2) n=id(r_s_2);
+            else if(g==3) n=id(r_s_3); else if(g==4) n=id(r_s_4); else if(g==5) n=id(r_s_5);
+            else if(g==6) n=id(r_s_6); else if(g==7) n=id(r_s_7); else n=id(r_s_8);
+            if(n) { auto call = n->make_call(); call.set_value(x); call.perform(); }
+
+  # --- 官方隐藏滑块 ---
+  - platform: ld2410
+    timeout: { name: "无人延时 (Timeout)" }
+    max_move_distance_gate: { name: "最大运动门 (Max Move Gate)" }
+    max_still_distance_gate: { name: "最大静止门 (Max Still Gate)" }
+    g0: { move_threshold: { id: r_m_0, internal: true }, still_threshold: { id: r_s_0, internal: true } }
+    g1: { move_threshold: { id: r_m_1, internal: true }, still_threshold: { id: r_s_1, internal: true } }
+    g2: { move_threshold: { id: r_m_2, internal: true }, still_threshold: { id: r_s_2, internal: true } }
+    g3: { move_threshold: { id: r_m_3, internal: true }, still_threshold: { id: r_s_3, internal: true } }
+    g4: { move_threshold: { id: r_m_4, internal: true }, still_threshold: { id: r_s_4, internal: true } }
+    g5: { move_threshold: { id: r_m_5, internal: true }, still_threshold: { id: r_s_5, internal: true } }
+    g6: { move_threshold: { id: r_m_6, internal: true }, still_threshold: { id: r_s_6, internal: true } }
+    g7: { move_threshold: { id: r_m_7, internal: true }, still_threshold: { id: r_s_7, internal: true } }
+    g8: { move_threshold: { id: r_m_8, internal: true }, still_threshold: { id: r_s_8, internal: true } }
+
+# --- 7. 同步脚本 ---
+script:
+  - id: sync_radar_to_ui
+    then:
+      - lambda: |-
+          int g = (id(ui_gate_sel).state[5] - '0');
+          float m=0; float s=0;
+          if(g==0){m=id(r_m_0).state; s=id(r_s_0).state;} else if(g==1){m=id(r_m_1).state; s=id(r_s_1).state;}
+          else if(g==2){m=id(r_m_2).state; s=id(r_s_2).state;} else if(g==3){m=id(r_m_3).state; s=id(r_s_3).state;}
+          else if(g==4){m=id(r_m_4).state; s=id(r_s_4).state;} else if(g==5){m=id(r_m_5).state; s=id(r_s_5).state;}
+          else if(g==6){m=id(r_m_6).state; s=id(r_s_6).state;} else if(g==7){m=id(r_m_7).state; s=id(r_s_7).state;}
+          else {m=id(r_m_8).state; s=id(r_s_8).state;}
+          id(ui_move_in).publish_state(m);
+          id(ui_still_in).publish_state(s);
+
+button:
+  - platform: ld2410
+    restart: { name: "🔄 重启雷达 (Restart)", icon: "mdi:restart" }
+    factory_reset: { name: "💾 恢复出厂设置 (Reset)", icon: "mdi:restore" }
