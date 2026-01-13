@@ -1,0 +1,370 @@
+esphome:
+  name: "ld2410d-radar-esp01m"
+  project:
+    name: ".radar_esp01m"
+    version: "1.6"
+  friendly_name: "ld2410d Radar (Auto Config 40dB)"
+  
+  on_boot:
+    priority: 600
+    then:
+      - delay: 3s
+      - logger.log: "正在自动配置阈值和工作模式..."
+      
+      # --- 自动阈值配置流程 (0-5 门 40 dB, 6-14 门 95 dB) ---
+      - lambda: |-
+          // 定义阈值和模式
+          int thresholds[15];
+          int motion_mode = 0x0010; // 运动模式基址
+          int micro_mode = 0x0030;  // 微动模式基址
+          
+          // 0-5 门设置为 40 dB
+          for (int i = 0; i <= 5; ++i) { thresholds[i] = 40; }
+          // 6-14 门设置为 95 dB (高阈值，相当于禁用)
+          for (int i = 6; i <= 14; ++i) { thresholds[i] = 95; }
+
+          // (A) 进入配置模式 (0x00FF, 0x0001)
+          uint8_t cmd_enter[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xFF, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_enter, sizeof(cmd_enter));
+          delay(500);
+
+          for (int gate = 0; gate <= 14; ++gate) {
+            float threshold_db = (float)thresholds[gate];
+            uint32_t raw_value = (uint32_t)pow(10, (threshold_db / 10.0));
+            uint8_t raw_bytes[4];
+            raw_bytes[0] = (uint8_t)(raw_value & 0xFF);
+            raw_bytes[1] = (uint8_t)((raw_value >> 8) & 0xFF);
+            raw_bytes[2] = (uint8_t)((raw_value >> 16) & 0xFF);
+            raw_bytes[3] = (uint8_t)((raw_value >> 24) & 0xFF);
+
+            // 1. 设置 Motion 阈值 (0x0007 + gate)
+            uint16_t motion_id = motion_mode + gate;
+            uint8_t cmd_motion[] = {
+              0xFD, 0xFC, 0xFB, 0xFA, 0x08, 0x00, 0x07, 0x00,
+              (uint8_t)(motion_id & 0xFF), (uint8_t)((motion_id >> 8) & 0xFF), 
+              raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3],
+              0x04, 0x03, 0x02, 0x01
+            };
+            id(uart_bus).write_array(cmd_motion, sizeof(cmd_motion));
+            delay(50); // 必须等待ACK
+
+            // 2. 设置 MicroMotion 阈值 (0x0007 + gate)
+            uint16_t micro_id = micro_mode + gate;
+            uint8_t cmd_micro[] = {
+              0xFD, 0xFC, 0xFB, 0xFA, 0x08, 0x00, 0x07, 0x00,
+              (uint8_t)(micro_id & 0xFF), (uint8_t)((micro_id >> 8) & 0xFF), 
+              raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3],
+              0x04, 0x03, 0x02, 0x01
+            };
+            id(uart_bus).write_array(cmd_micro, sizeof(cmd_micro));
+            delay(50); // 必须等待ACK
+          }
+
+          // 3. 掉电保存 (0x00FD)
+          uint8_t cmd_save[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFD, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_save, sizeof(cmd_save));
+          delay(500);
+          
+          // --- 模式配置流程 (确保 Hex 帧解析工作) ---
+          
+          // 4. 设置为工程模式 (0x0012, 0x00000004)
+          uint8_t cmd_eng_mode[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x08, 0x00, 0x12, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_eng_mode, sizeof(cmd_eng_mode));
+          delay(500);
+          
+          // 5. 退出配置模式 (0x00FE)
+          uint8_t cmd_exit[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFE, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_exit, sizeof(cmd_exit));
+          
+          //logger.log("自动配置完成！");
+
+
+# --- 原始代码的其余部分保持不变 ---
+
+esp8266:
+  board: esp01_1m
+
+switch:
+  - platform: gpio
+    id: hw_pwr_pin
+    pin: 12
+    name: "Hardware Power Pin"
+    internal: true
+    restore_mode: ALWAYS_ON
+  - platform: restart
+    id: restarts
+    name: restart
+    #internal: true
+
+logger:
+  baud_rate: 0
+
+api:
+ota:
+  - platform: esphome
+web_server:
+  port: 80
+
+wifi:
+  networks:
+  - ssid: "ChinaNet-3CEEVV"
+    password: "12345678910"
+    manual_ip:
+      static_ip: 192.168.2.45
+      gateway: 192.168.2.1
+      subnet: 255.255.255.0
+  use_address: 192.168.2.45
+
+captive_portal:
+
+uart:
+  id: uart_bus
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 115200
+
+globals:
+  - id: selected_gate
+    type: int
+    initial_value: '0'
+  - id: selected_mode_id
+    type: uint16_t
+    initial_value: '0x0010'
+  - id: last_d
+    type: int
+    initial_value: '0'
+  - id: last_t
+    type: uint32_t
+    initial_value: '0'
+
+# ===================== UI 调参控制台 =====================
+select:
+  - platform: template
+    name: "⚡ 雷达电源控制 (Radar Power)"
+    id: ui_pwr_sel
+    icon: mdi:power
+    options: ["🟢 开启 (Power ON)", "🔴 关闭 (Power OFF)"]
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            if (x == "🟢 开启 (Power ON)") id(hw_pwr_pin).turn_on();
+            else {
+              id(hw_pwr_pin).turn_off();
+              id(radar_direction).publish_state("💤 已断电 (Off)");
+            }
+  - platform: template
+    name: "设置-选择距离门 (Select Gate)"
+    id: gate_selector
+    optimistic: true
+    options:
+      - "距离门 0 (0.7m)"
+      - "距离门 1 (1.4m)"
+      - "距离门 2 (2.1m)"
+      - "距离门 3 (2.8m)"
+      - "距离门 4 (3.5m)"
+      - "距离门 5 (4.2m)"
+      - "距离门 6 (4.9m)"
+      - "距离门 7 (5.6m)"
+      - "距离门 8 (6.3m)"
+      - "距离门 9 (7.0m)"
+      - "距离门 10 (7.7m)"
+      - "距离门 11 (8.4m)"
+      - "距离门 12 (9.1m)"
+      - "距离门 13 (9.8m)"
+      - "距离门 14 (10.5m)"
+      - "距离门 15 (11.2m)"
+    initial_option: "距离门 0 (0.7m)"
+    on_value:
+      - lambda: |-
+          size_t index = x.find("距离门 ");
+          if (index != std::string::npos) {
+            std::string num_part = x.substr(index + 9, 2);
+            id(selected_gate) = atoi(num_part.c_str());
+          }
+
+  - platform: template
+    name: "设置-选择模式 (Select Mode)"
+    id: mode_selector
+    optimistic: true
+    options:
+      - "运动触发 (Motion)"
+      - "静止微动 (Still)"
+    initial_option: "运动触发 (Motion)"
+    on_value:
+      - lambda: |-
+          if (x == "运动触发 (Motion)") id(selected_mode_id) = 0x0010;
+          else id(selected_mode_id) = 0x0030;
+
+number:
+  - platform: template
+    name: "设置-门限数值 (Threshold dB)"
+    id: threshold_input
+    min_value: 0
+    max_value: 95
+    step: 1
+    initial_value: 30
+    optimistic: true
+    unit_of_measurement: "dB"
+
+# ===================== 传感器显示 (原始解析逻辑) =====================
+binary_sensor:
+  - platform: template
+    name: "有人存在 (Occupancy)"
+    id: radar_presence
+    device_class: occupancy
+    
+sensor:
+  - platform: template
+    name: "🎯 实时探测距离"
+    id: radar_distance
+    unit_of_measurement: "cm"
+    accuracy_decimals: 0
+
+  - platform: template
+    name: "Radar Speed (Value)"
+    id: radar_speed
+    unit_of_measurement: "cm/s"
+    accuracy_decimals: 1
+
+  - platform: template
+    name: "⚡ 实时能量流 (dB)"
+    id: radar_energy
+    unit_of_measurement: "dB"
+    accuracy_decimals: 1
+    
+text_sensor:
+  - platform: template
+    name: "Radar Direction (Text)"
+    id: radar_direction
+
+# ===================== UART 原始数据帧解析逻辑 (工程模式 Hex 帧) =====================
+interval:
+  - interval: 50ms
+    then:
+      - lambda: |-
+          // 恢复你原始 YAML 中的 Hex 帧解析逻辑
+          static std::vector<uint8_t> rx_buffer;
+          while (id(uart_bus).available()) {
+            uint8_t byte;
+            id(uart_bus).read_byte(&byte);
+            rx_buffer.push_back(byte);
+
+            if (rx_buffer.size() < 4) continue;
+            // 检查 Hex 帧头 F4 F3 F2 F1
+            if (rx_buffer[0] != 0xF4 || rx_buffer[1] != 0xF3 || rx_buffer[2] != 0xF2 || rx_buffer[3] != 0xF1) {
+              rx_buffer.erase(rx_buffer.begin());
+              continue;
+            }
+            if (rx_buffer.size() < 141) continue; // 最小帧长
+
+            // 检查 Hex 帧尾 F8 F7 F6 F5
+            if (rx_buffer[137] == 0xF8 && rx_buffer[138] == 0xF7 && rx_buffer[139] == 0xF6 && rx_buffer[140] == 0xF5) {
+              // 解析 Hex 帧数据
+              uint8_t res = rx_buffer[6]; 
+              uint16_t dist = (uint16_t)rx_buffer[7] | ((uint16_t)rx_buffer[8] << 8); // 小端模式解析距离
+
+              // 发布基础状态和距离
+              id(radar_presence).publish_state(res > 0);
+              id(radar_distance).publish_state(dist);
+
+              // 速度计算 (Motion: 0x01, Still: 0x02)
+              uint32_t now_ms = millis();
+              if (res == 1 || res == 2) {
+                float dt = (now_ms - id(last_t)) / 1000.0f;
+                if (dt > 0) {
+                  float speed = (float(dist) - float(id(last_d))) / dt;
+                  if (std::abs(speed) > 3.0) { // 最小速度阈值
+                    id(radar_speed).publish_state(speed);
+                    id(radar_direction).publish_state(speed > 0 ? "远离 (Leaving)" : "靠近 (Toward)");
+                  }
+                }
+                id(last_d) = dist; id(last_t) = now_ms;
+              } else { // 无人
+                id(radar_speed).publish_state(0);
+                id(radar_direction).publish_state("无人");
+                id(last_d) = 0; id(last_t) = now_ms;
+              }
+              
+              // 能量值解析 (原始 YAML 中的逻辑)
+              int gate = id(selected_gate); // 使用当前选中的门
+              if (dist > 0) {
+                gate = dist / 70; // 如果有距离，强制用距离所在的门
+                if (gate > 14) gate = 14;
+              } else {
+                gate = id(selected_gate);
+              }
+              
+              size_t offset = 9 + (gate * 4); // 偏移量计算
+              uint32_t raw_e = (uint32_t)rx_buffer[offset] | ((uint32_t)rx_buffer[offset+1] << 8) | 
+                               ((uint32_t)rx_buffer[offset+2] << 16) | ((uint32_t)rx_buffer[offset+3] << 24);
+                               
+              if (raw_e > 0) {
+                id(radar_energy).publish_state(10.0f * log10f((float)raw_e));
+              } else {
+                id(radar_energy).publish_state(0.0f);
+              }
+
+
+              rx_buffer.clear();
+            } else {
+              rx_buffer.erase(rx_buffer.begin()); // 帧尾不匹配，丢弃第一个字节
+            }
+          }
+
+# ===================== 功能执行按键 =====================
+button:
+  - platform: template
+    name: "【执行】写入当前门限并保存 (SET & SAVE)"
+    icon: "mdi:flash"
+    on_press:
+      - lambda: |-
+          // 1. 定义要修改的门和数值
+          int gate = id(selected_gate);
+          float threshold_db = id(threshold_input).state;
+
+          // 2. 将 dB 值转换为雷达所需的原始能量值 (M = 10^(N/10))
+          uint32_t raw_value = (uint32_t)pow(10, (threshold_db / 10.0));
+          
+          // 3. 准备命令字
+          uint16_t final_id = id(selected_mode_id) + gate;
+
+          // **********************************************
+          // ** 原子操作开始：单次阈值写入与保存 **
+          // **********************************************
+
+          // (A) 进入配置模式 (0x00FF, 0x0001)
+          uint8_t cmd_enter[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xFF, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_enter, sizeof(cmd_enter));
+          delay(100);
+
+          // (B) 写入 阈值 (0x0007)
+          uint8_t cmd_set[] = {
+            0xFD, 0xFC, 0xFB, 0xFA, 0x08, 0x00, 0x07, 0x00,
+            (uint8_t)(final_id & 0xFF), (uint8_t)((final_id >> 8) & 0xFF), 
+            (uint8_t)(raw_value & 0xFF), (uint8_t)((raw_value >> 8) & 0xFF), 
+            (uint8_t)((raw_value >> 16) & 0xFF), (uint8_t)((raw_value >> 24) & 0xFF),
+            0x04, 0x03, 0x02, 0x01
+          };
+          id(uart_bus).write_array(cmd_set, sizeof(cmd_set));
+          delay(100);
+
+          // (C) 掉电保存 (0x00FD)
+          uint8_t cmd_save[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFD, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_save, sizeof(cmd_save));
+          delay(100);
+          
+          // (D) 退出配置模式 (0x00FE)
+          uint8_t cmd_exit[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFE, 0x00, 0x04, 0x03, 0x02, 0x01};
+          id(uart_bus).write_array(cmd_exit, sizeof(cmd_exit));
+
+
+  - platform: template
+    name: "恢复出厂设置 (Factory Reset)"
+    on_press:
+      - uart.write: [0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA2, 0x00, 0x04, 0x03, 0x02, 0x01]
+
+  - platform: template
+    name: "重启雷达模块 (Module Reboot)"
+    on_press:
+      - uart.write: [0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA3, 0x00, 0x04, 0x03, 0x02, 0x01]
