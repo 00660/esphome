@@ -1,0 +1,382 @@
+esphome:
+  name: soymilk_maker
+  project:
+    name: "my_home.soymilk_brain"
+    version: "18.0"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf # 保持 IDF，防砖
+    sdkconfig_options:
+      CONFIG_FREERTOS_UNICORE: y
+    advanced:
+      ignore_efuse_mac_crc: true
+
+web_server:
+  port: 80
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  networks:
+  - ssid: "Xiaomi-4343"
+    password: "3uf8583n"
+    manual_ip:
+      static_ip: 192.168.2.58
+      gateway: 192.168.2.1
+      subnet: 255.255.255.0
+  #use_address: 192.168.2.122
+  - ssid: "ChinaNet-3CEEVV"
+    password: "123456sb"
+    manual_ip:
+      static_ip: 192.168.2.58
+      gateway: 192.168.2.1
+      subnet: 255.255.255.0
+  use_address: 192.168.2.58
+
+time:
+  - platform: homeassistant
+    id: sntp_time
+
+# =================================================================
+# 全局变量 (注意：初始值也要对应新的带Emoji的名字)
+# =================================================================
+globals:
+  - id: last_mode
+    type: std::string
+    initial_value: '"待机 Standby 🛑"'
+  - id: start_time_seconds
+    type: int
+    initial_value: '0'
+# =================================================================
+text_sensor:
+  - platform: template
+    name: "工作耗时 Timer ⏱️"
+    id: work_timer_text
+    update_interval: 1s
+    icon: mdi:timer-outline
+    lambda: |-
+      if (id(soymilk_mode).state == "待机 Standby 🛑" || id(start_time_seconds) == 0) {
+        return {"00:00"};
+      }
+      
+      int total_seconds = id(sntp_time).now().timestamp - id(start_time_seconds);
+      if (total_seconds < 0) return {"00:00"};
+
+      int minutes = total_seconds / 60;
+      int seconds = total_seconds % 60;
+      
+      // 如果电机正在转，给计时器后面加个动态的小图标
+      std::string motor_status = id(sw_motor_direct).state ? " 🔄" : "";
+      
+      char buffer[20];
+      sprintf(buffer, "%02d:%02d%s", minutes, seconds, motor_status.c_str());
+      return {buffer};
+# ================================================================
+sensor:
+  # 22脚：监控原机蜂鸣器信号频率
+  - platform: pulse_counter
+    pin: 22
+    id: buzzer_freq
+    name: "Buzzer Pitch 📈"
+    unit_of_measurement: "Hz"
+    update_interval: 1s
+    # pulse_counter 默认返回 CPM（每分钟脉冲数）
+    # 乘以 0.01666667 得到 Hz（每秒脉冲数）
+    filters:
+      - multiply: 0.01666667
+    icon: mdi:music-note
+  - platform: template
+    name: "电机实时功率 Motor Power ⚡"
+    id: motor_realtime_power
+    unit_of_measurement: "W"
+    accuracy_decimals: 1
+    icon: mdi:flash-outline
+    update_interval: 1s
+    lambda: |-
+      // 如果直驱电机开关是开启状态，则功率为 131W
+      if (id(sw_motor_direct).state) {
+        return 131.0;
+      } else {
+        return 0.0;
+      }
+
+# =================================================================
+switch:
+  # --- 内部功能键 (点动) ---
+  - platform: gpio
+    pin: 16
+    id: sw_wugu
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - delay: 100ms
+      - switch.turn_off: sw_wugu
+
+  - platform: gpio
+    pin: 17
+    id: sw_quandou
+    internal: true
+    #inverted: true 
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - delay: 100ms
+      - switch.turn_off: sw_quandou
+
+  - platform: gpio
+    pin: 19
+    id: sw_lvdou
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - delay: 100ms
+      - switch.turn_off: sw_lvdou
+
+  - platform: gpio
+    pin: 25
+    id: sw_mihu
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - delay: 100ms
+      - switch.turn_off: sw_mihu
+
+  - platform: gpio
+    pin: 18
+    id: sw_guoshu
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - delay: 100ms
+      - switch.turn_off: sw_guoshu
+
+  # --- 硬件控制 ---
+  - platform: gpio
+    pin: 23
+    id: sw_motor_direct
+    internal: true 
+    restore_mode: ALWAYS_OFF #直驱电机
+
+  - platform: gpio
+    pin: 26
+    id: sw_heater
+    internal: true 
+    restore_mode: ALWAYS_ON ###发热管控制电路
+
+  - platform: gpio
+    pin: 14
+    id: sw_spoofer
+    internal: true 
+    restore_mode: ALWAYS_OFF ##水位传感器
+
+# =================================================================
+# 自动化脚本：干磨逻辑 (转10秒，停10秒，循环5分钟)
+# =================================================================
+script:
+  - id: dry_grind_job
+    then:
+      - repeat:
+          count: 15 # (10+10)*15 = 300s = 5min
+          then:
+            - switch.turn_on: sw_motor_direct
+            - delay: 10s
+            - switch.turn_off: sw_motor_direct
+            - delay: 10s
+      # 结束后回待机
+      - select.set:
+          id: soymilk_mode
+          option: "待机 Standby 🛑"
+
+# =================================================================
+# 2. 模式控制中心 (Select) - 已更新所有名称匹配
+# =================================================================
+select:
+  - platform: template
+    name: "豆浆机模式 Mode 👨‍🍳"
+    id: soymilk_mode
+    optimistic: true
+    options:
+      - "待机 Standby 🛑"
+      - "五谷 Grains 🌾"
+      - "全豆 Soybean 🥔"
+      - "绿豆沙 Mung Bean 🟢"
+      - "米糊 Rice Paste 🍚"
+      - "果蔬 Fruit 🍎"
+      - "干磨 Dry Grind 🌪️"
+    initial_option: "待机 Standby 🛑"
+    set_action:
+      - lambda: |-
+          std::string old_mode = id(last_mode);
+          std::string new_mode = x;
+           // === [计时器逻辑] ===
+          if (new_mode == "待机 Standby 🛑") {
+            id(start_time_seconds) = 0; // 停止并清零计时
+          } else {
+            // 开启功能时，记录当前时间戳
+            id(start_time_seconds) = id(sntp_time).now().timestamp;
+          }
+          // === 强制停止脚本 ===
+          if (old_mode == "干磨 Dry Grind 🌪️") {
+            id(dry_grind_job).stop();
+            id(sw_motor_direct).turn_off();
+          }
+
+          // === 场景1：切回待机 ===
+          if (new_mode == "待机 Standby 🛑") {
+             if (old_mode == "五谷 Grains 🌾") id(sw_wugu).turn_on();
+             else if (old_mode == "全豆 Soybean 🥔") id(sw_quandou).turn_on();
+             else if (old_mode == "绿豆沙 Mung Bean 🟢") id(sw_lvdou).turn_on();
+             else if (old_mode == "米糊 Rice Paste 🍚") id(sw_mihu).turn_on();
+             else if (old_mode == "果蔬 Fruit 🍎") id(sw_guoshu).turn_on();
+             
+             id(sw_heater).turn_off();
+             id(last_mode) = "待机 Standby 🛑";
+             return;
+          }
+
+          // === 场景2：启动干磨 ===
+          if (new_mode == "干磨 Dry Grind 🌪️") {
+             // 如果之前在跑别的，先复位
+             if (old_mode != "待机 Standby 🛑" && old_mode != "干磨 Dry Grind 🌪️") {
+                 if (old_mode == "五谷 Grains 🌾") id(sw_wugu).turn_on();
+                 else if (old_mode == "全豆 Soybean 🥔") id(sw_quandou).turn_on();
+                 else if (old_mode == "绿豆沙 Mung Bean 🟢") id(sw_lvdou).turn_on();
+                 else if (old_mode == "米糊 Rice Paste 🍚") id(sw_mihu).turn_on();
+                 else if (old_mode == "果蔬 Fruit 🍎") id(sw_guoshu).turn_on();
+                 delay(500);
+             }
+             
+             id(sw_heater).turn_off(); 
+             id(sw_spoofer).turn_on();
+             id(dry_grind_job).execute(); 
+             
+             id(last_mode) = "干磨 Dry Grind 🌪️";
+             return;
+          }
+
+          // === 场景3：启动普通功能 ===
+          esphome::switch_::Switch *target_sw = nullptr;
+          if (new_mode == "五谷 Grains 🌾") target_sw = id(sw_wugu);
+          else if (new_mode == "全豆 Soybean 🥔") target_sw = id(sw_quandou);
+          else if (new_mode == "绿豆沙 Mung Bean 🟢") target_sw = id(sw_lvdou);
+          else if (new_mode == "米糊 Rice Paste 🍚") target_sw = id(sw_mihu);
+          else if (new_mode == "果蔬 Fruit 🍎") target_sw = id(sw_guoshu);
+
+          if (target_sw != nullptr) {
+            if (old_mode == "待机 Standby 🛑") {
+               target_sw->turn_on(); // 待机 -> 启动
+            } 
+            else {
+               // 运行 -> 切换 (找第三者复位逻辑)
+               esphome::switch_::Switch *reset_sw = nullptr;
+               // 注意：这里的字符串比较必须和上面options完全一致
+               if (new_mode != "五谷 Grains 🌾" && old_mode != "五谷 Grains 🌾") reset_sw = id(sw_wugu);
+               else if (new_mode != "全豆 Soybean 🥔" && old_mode != "全豆 Soybean 🥔") reset_sw = id(sw_quandou);
+               else if (new_mode != "绿豆沙 Mung Bean 🟢" && old_mode != "绿豆沙 Mung Bean 🟢") reset_sw = id(sw_lvdou);
+               else if (new_mode != "米糊 Rice Paste 🍚" && old_mode != "米糊 Rice Paste 🍚") reset_sw = id(sw_mihu);
+               else reset_sw = id(sw_guoshu); 
+
+               if (reset_sw != nullptr) {
+                  reset_sw->turn_on();
+                  delay(200);
+                  target_sw->turn_on();
+               }
+            }
+          }
+
+          // 辅助设备
+          if (new_mode == "果蔬 Fruit 🍎") {
+            id(sw_heater).turn_off();
+            id(sw_spoofer).turn_on();
+          } else {
+            id(sw_heater).turn_on();
+            id(sw_spoofer).turn_on();
+          }
+
+          id(last_mode) = new_mode;
+
+# =================================================================
+# 3. 物理按键 (任意按键中断干磨)
+# =================================================================
+binary_sensor:
+  
+  - platform: gpio
+    pin: { number: 32, mode: INPUT }
+    id: btn_mihu
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_release:
+      - lambda: |-
+          if (id(soymilk_mode).state == "干磨 Dry Grind 🌪️") {
+            id(soymilk_mode).make_call().set_option("待机 Standby 🛑").perform();
+          } else {
+            id(soymilk_mode).make_call().set_option("米糊 Rice Paste 🍚").perform();
+          }
+
+  - platform: gpio
+    pin: { number: 33, mode: INPUT }
+    id: btn_lvdou
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_release:
+      - lambda: |-
+          if (id(soymilk_mode).state == "干磨 Dry Grind 🌪️") {
+            id(soymilk_mode).make_call().set_option("待机 Standby 🛑").perform();
+          } else {
+            id(soymilk_mode).make_call().set_option("绿豆沙 Mung Bean 🟢").perform();
+          }
+
+  - platform: gpio
+    pin: { number: 34, mode: INPUT }
+    id: btn_wugu
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_release:
+      - lambda: |-
+          if (id(soymilk_mode).state == "干磨 Dry Grind 🌪️") {
+            id(soymilk_mode).make_call().set_option("待机 Standby 🛑").perform();
+          } else {
+            id(soymilk_mode).make_call().set_option("五谷 Grains 🌾").perform();
+          }
+
+  - platform: gpio
+    pin: { number: 35, mode: INPUT }
+    id: btn_quandou
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_release:
+      - lambda: |-
+          if (id(soymilk_mode).state == "干磨 Dry Grind 🌪️") {
+            id(soymilk_mode).make_call().set_option("待机 Standby 🛑").perform();
+          } else {
+            id(soymilk_mode).make_call().set_option("全豆 Soybean 🥔").perform();
+          }
+
+  - platform: gpio
+    pin: { number: 27, mode: INPUT }
+    id: btn_guoshu
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_release:
+      - lambda: |-
+          if (id(soymilk_mode).state == "干磨 Dry Grind 🌪️") {
+            id(soymilk_mode).make_call().set_option("待机 Standby 🛑").perform();
+          } else {
+            id(soymilk_mode).make_call().set_option("果蔬 Fruit 🍎").perform();
+          }
+
+  - platform: gpio
+    pin: { number: 4, mode: INPUT }
+    id: signal_motor
+    internal: true 
+    filters: { delayed_on_off: 50ms }
+    on_press:
+      then:
+        - switch.turn_on: sw_motor_direct
+    on_release:
+      then:
+        - switch.turn_off: sw_motor_direct
+    
