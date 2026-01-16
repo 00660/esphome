@@ -1,0 +1,121 @@
+####发热管用继电器控制通断NTC电阻贴在发热盘底部烧开时候看看温度是多少减去差值校准
+
+esphome:
+  name: smart-kettle
+
+esp8266:
+  board: d1_mini
+
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  networks:
+    - ssid: "ChinaNet-3CEEVV"
+      password: "12345666b"
+  manual_ip:
+    static_ip: 192.168.2.59
+    gateway: 192.168.2.1
+    subnet: 255.255.255.0
+
+web_server:
+  port: 80
+  version: 3
+
+time:
+  - platform: homeassistant
+    id: sntp_time
+
+sensor:
+  # -----------------------------------------------------------------
+  # 1. ADC 电压校准
+  # 目标：让 ESP8266 显示 2.055V (你万用表测的真值)
+  # -----------------------------------------------------------------
+  - platform: adc
+    pin: A0
+    id: source_adc
+    name: "A点真实电压"
+    unit_of_measurement: "V"
+    update_interval: 1s
+    accuracy_decimals: 3
+    internal: true
+    filters:
+      # 这里的 multiply 用来微调。
+      # 如果 D1_mini 默认读出来比 2.055 高，就调小一点；低了就调大。
+      # 比如 2.055 / 2.349 * 3.3 ≈ 2.9 左右，先给个 2.9 试试
+      - multiply: 2.92
+      # 或者直接用线性校准（更准），把你日志里读到的数填左边，2.055 填右边
+      # - calibrate_linear:
+      #     - 0.0 -> 0.0
+      #     - 2.35 -> 2.055
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 1
+    icon: "mdi:flash"
+
+  # -----------------------------------------------------------------
+  # 2. 测温换算 (改为 10k NTC)
+  # -----------------------------------------------------------------
+  - platform: resistance
+    id: ntc_resistance
+    sensor: source_adc
+    configuration: DOWNSTREAM
+    resistor: 10kOhm    # 上拉电阻 10k
+    reference_voltage: 3.3V
+    internal: true
+
+  - platform: ntc
+    id: kettle_temp
+    sensor: ntc_resistance
+    name: "实时水温"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      # 【核心修改】这里改成 10k！
+      # 只有改成 10k，2.055V 才会对应 12度！
+      reference_resistance: 10kOhm
+    on_value_range:
+      - above: 101.0
+        then:
+          - climate.control: {id: kettle_ctrl, mode: "OFF"}
+          - switch.turn_off: heater_relay
+
+# -----------------------------------------------------------------
+# 3. 控制部分
+# -----------------------------------------------------------------
+switch:
+  - platform: gpio
+    pin: 5
+    id: heater_relay
+    name: "加热管开关"
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+climate:
+  - platform: bang_bang
+    name: "水壶恒温器"
+    id: kettle_ctrl
+    sensor: kettle_temp
+    default_target_temperature_low: 1
+    default_target_temperature_high: 100
+    heat_action:
+      - switch.turn_on: heater_relay
+    idle_action:
+      - switch.turn_off: heater_relay
+    visual:
+      min_temperature: 1
+      max_temperature: 100
+      temperature_step: 1
+
+binary_sensor:
+  - platform: gpio
+    pin: {number: 14, mode: INPUT_PULLUP, inverted: true}
+    name: "手动停止"
+    internal: true
+    on_press:
+      then:
+        - climate.control: {id: kettle_ctrl, mode: "OFF"}
+        - switch.turn_off: heater_relay
